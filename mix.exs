@@ -26,6 +26,7 @@ defmodule VRL.MixProject do
     [
       {:rustler_precompiled, "~> 0.10"},
       {:rustler, "~> 0.38", optional: true},
+      {:stream_data, "~> 1.4", only: :test},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
     ]
   end

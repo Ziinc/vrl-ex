@@ -1,14 +1,15 @@
+use std::mem::ManuallyDrop;
+
 use chrono::{DateTime, Datelike, NaiveDate, TimeDelta, Timelike, Utc};
 use rustler::types::map::MapIterator;
 use rustler::{
-    Atom, Binary, Encoder, Env, Error, ListIterator, NewBinary, NifResult, NifStruct, ResourceArc,
-    Term, TermType,
+    Atom, Binary, Encoder, Env, Error, NewBinary, NifResult, NifStruct, ResourceArc, Term, TermType,
 };
 use vrl::compiler::runtime::{Runtime, Terminate};
 use vrl::compiler::state::RuntimeState;
 use vrl::compiler::{Program, TargetValue, TimeZone};
 use vrl::diagnostic::Formatter;
-use vrl::value::{KeyString, ObjectMap, Secrets, Value};
+use vrl::value::{KeyString, ObjectMap, ObjectMapIter, Secrets, Value};
 
 mod atoms {
     rustler::atoms! { ok, error, abort, nil, calendar_iso = "Elixir.Calendar.ISO" }
@@ -62,7 +63,22 @@ impl ElixirDateTime {
     }
 }
 
-pub struct ProgramResource(Program);
+/// Dirty scheduler stacks are ~320KB; VRL's recursive parser and evaluator
+/// overflow them on deeply nested input, so VRL work runs on a larger stack.
+/// The memory is reserved, not committed, until touched.
+const STACK_SIZE: usize = 256 * 1024 * 1024;
+
+/// Maximum container nesting accepted from and returned to Elixir.
+const MAX_DEPTH: usize = 128;
+
+pub struct ProgramResource(ManuallyDrop<Program>);
+
+impl Drop for ProgramResource {
+    fn drop(&mut self) {
+        // SAFETY: the program is dropped exactly once, here.
+        stacker::grow(STACK_SIZE, || unsafe { ManuallyDrop::drop(&mut self.0) });
+    }
+}
 
 // Compiled programs are immutable, so a panic cannot leave them inconsistent.
 impl std::panic::RefUnwindSafe for ProgramResource {}
@@ -71,16 +87,29 @@ impl std::panic::RefUnwindSafe for ProgramResource {}
 impl rustler::Resource for ProgramResource {}
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn compile(source: &str) -> Result<ResourceArc<ProgramResource>, String> {
-    let fns = vrl::stdlib::all();
-    vrl::compiler::compile(source, &fns)
-        .map(|result| ResourceArc::new(ProgramResource(result.program)))
-        .map_err(|diagnostics| {
-            Formatter::new(source, diagnostics)
-                .to_string()
-                .trim()
-                .to_owned()
-        })
+fn compile(source: Binary) -> Result<ResourceArc<ProgramResource>, String> {
+    let source = std::str::from_utf8(source.as_slice())
+        .map_err(|_| "source must be valid UTF-8".to_owned())?;
+    let program = stacker::grow(STACK_SIZE, || {
+        let fns = vrl::stdlib::all();
+        vrl::compiler::compile(source, &fns)
+            .map(|result| result.program)
+            .map_err(|diagnostics| {
+                Formatter::new(source, diagnostics)
+                    .to_string()
+                    .trim()
+                    .to_owned()
+            })
+    })?;
+    Ok(ResourceArc::new(ProgramResource(ManuallyDrop::new(
+        program,
+    ))))
+}
+
+enum Outcome {
+    Ok(Value, Value),
+    Abort(String),
+    Error(String),
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -89,29 +118,158 @@ fn run<'a>(
     program: ResourceArc<ProgramResource>,
     event: Term<'a>,
 ) -> NifResult<Term<'a>> {
-    let mut target = TargetValue {
-        value: decode(event)?,
-        metadata: Value::Object(ObjectMap::new()),
-        secrets: Secrets::default(),
-    };
-    let mut runtime = Runtime::new(RuntimeState::default());
+    let value = decode(event)?;
 
-    Ok(
+    // Only pure Rust runs on the grown stack; ERTS calls stay on the scheduler stack.
+    let outcome = stacker::grow(STACK_SIZE, move || {
+        let mut target = TargetValue {
+            value,
+            metadata: Value::Object(ObjectMap::new()),
+            secrets: Secrets::default(),
+        };
+        let mut runtime = Runtime::new(RuntimeState::default());
         match runtime.resolve(&mut target, &program.0, &TimeZone::default()) {
-            Ok(value) => (atoms::ok(), encode(env, &value), encode(env, &target.value)).encode(env),
-            Err(Terminate::Abort(err)) => {
-                (atoms::error(), (atoms::abort(), err.to_string())).encode(env)
+            Ok(value) if too_deep(&value, 0) || too_deep(&target.value, 0) => {
+                Outcome::Error(depth_message())
             }
-            Err(err) => (atoms::error(), err.to_string()).encode(env),
-        },
-    )
+            Ok(value) => Outcome::Ok(value, target.value),
+            Err(Terminate::Abort(err)) => Outcome::Abort(err.to_string()),
+            Err(err) => Outcome::Error(err.to_string()),
+        }
+    });
+
+    Ok(match outcome {
+        Outcome::Ok(value, event) => {
+            (atoms::ok(), encode(env, &value), encode(env, &event)).encode(env)
+        }
+        Outcome::Abort(message) => (atoms::error(), (atoms::abort(), message)).encode(env),
+        Outcome::Error(message) => (atoms::error(), message).encode(env),
+    })
 }
 
+fn depth_message() -> String {
+    format!("maximum nesting depth of {MAX_DEPTH} exceeded")
+}
+
+fn too_deep(value: &Value, depth: usize) -> bool {
+    match value {
+        Value::Array(_) | Value::Object(_) if depth >= MAX_DEPTH => true,
+        Value::Array(items) => items.iter().any(|v| too_deep(v, depth + 1)),
+        Value::Object(map) => map.values().any(|v| too_deep(v, depth + 1)),
+        _ => false,
+    }
+}
+
+#[inline(never)]
+fn depth_error() -> Error {
+    Error::Term(Box::new(depth_message()))
+}
+
+#[inline(never)]
 fn unsupported(term: Term) -> Error {
     Error::Term(Box::new(format!("unsupported term: {term:?}")))
 }
 
-fn decode(term: Term) -> NifResult<Value> {
+// decode and encode walk terms with an explicit heap stack instead of
+// recursion: they run on the small scheduler stack, where ERTS calls must stay.
+// Frames live in a heap Vec; MapIterator alone is ~288 bytes.
+#[allow(clippy::large_enum_variant)]
+enum DecodeFrame<'a> {
+    List {
+        items: Vec<Value>,
+        tail: Term<'a>,
+        whole: Term<'a>,
+    },
+    Map {
+        map: ObjectMap,
+        iter: MapIterator<'a>,
+        key: Option<KeyString>,
+    },
+}
+
+impl<'a> DecodeFrame<'a> {
+    fn accept(&mut self, value: Value) {
+        match self {
+            DecodeFrame::List { items, .. } => items.push(value),
+            DecodeFrame::Map { map, key, .. } => {
+                map.insert(key.take().expect("key precedes value"), value);
+            }
+        }
+    }
+
+    fn next_child(&mut self) -> NifResult<Option<Term<'a>>> {
+        match self {
+            DecodeFrame::List { tail, whole, .. } => {
+                if tail.is_empty_list() {
+                    return Ok(None);
+                }
+                let (head, rest) = tail.list_get_cell().map_err(|_| unsupported(*whole))?;
+                *tail = rest;
+                Ok(Some(head))
+            }
+            DecodeFrame::Map { iter, key, .. } => match iter.next() {
+                Some((k, v)) => {
+                    *key = Some(decode_key(k)?);
+                    Ok(Some(v))
+                }
+                None => Ok(None),
+            },
+        }
+    }
+
+    fn finish(self) -> Value {
+        match self {
+            DecodeFrame::List { items, .. } => Value::Array(items),
+            DecodeFrame::Map { map, .. } => Value::Object(map),
+        }
+    }
+}
+
+fn decode(root: Term) -> NifResult<Value> {
+    let mut stack: Vec<DecodeFrame> = Vec::new();
+    let mut next = root;
+    loop {
+        let is_list = next.is_list() || next.is_empty_list();
+        let mut ready = if !is_list && !next.is_map() {
+            Some(decode_scalar(next)?)
+        } else if stack.len() >= MAX_DEPTH {
+            return Err(depth_error());
+        } else if is_list {
+            stack.push(DecodeFrame::List {
+                items: Vec::new(),
+                tail: next,
+                whole: next,
+            });
+            None
+        } else if let Some(timestamp) = decode_datetime(next) {
+            Some(timestamp?)
+        } else {
+            stack.push(DecodeFrame::Map {
+                map: ObjectMap::new(),
+                iter: MapIterator::new(next).ok_or(Error::BadArg)?,
+                key: None,
+            });
+            None
+        };
+
+        loop {
+            let Some(top) = stack.last_mut() else {
+                return Ok(ready.expect("root value"));
+            };
+            if let Some(value) = ready.take() {
+                top.accept(value);
+            }
+            if let Some(child) = top.next_child()? {
+                next = child;
+                break;
+            }
+            ready = stack.pop().map(DecodeFrame::finish);
+        }
+    }
+}
+
+#[inline(never)]
+fn decode_scalar(term: Term) -> NifResult<Value> {
     match term.get_type() {
         TermType::Binary => Ok(Value::from(term.decode::<Binary>()?.as_slice())),
         TermType::Integer => term
@@ -128,26 +286,21 @@ fn decode(term: Term) -> NifResult<Value> {
                 Ok(Value::from(term.atom_to_string()?))
             }
         }
-        TermType::List => term
-            .decode::<ListIterator>()?
-            .map(decode)
-            .collect::<NifResult<Vec<_>>>()
-            .map(Value::Array),
-        TermType::Map => match term.decode::<ElixirDateTime>() {
-            Ok(dt) => dt
-                .to_utc()
-                .map(Value::Timestamp)
-                .ok_or_else(|| unsupported(term)),
-            Err(_) => MapIterator::new(term)
-                .ok_or(Error::BadArg)?
-                .map(|(k, v)| Ok((decode_key(k)?, decode(v)?)))
-                .collect::<NifResult<ObjectMap>>()
-                .map(Value::Object),
-        },
         _ => Err(unsupported(term)),
     }
 }
 
+#[inline(never)]
+fn decode_datetime(term: Term) -> Option<NifResult<Value>> {
+    let dt = term.decode::<ElixirDateTime>().ok()?;
+    Some(
+        dt.to_utc()
+            .map(Value::Timestamp)
+            .ok_or_else(|| unsupported(term)),
+    )
+}
+
+#[inline(never)]
 fn decode_key(term: Term) -> NifResult<KeyString> {
     match term.get_type() {
         TermType::Binary => Ok(term
@@ -159,7 +312,88 @@ fn decode_key(term: Term) -> NifResult<KeyString> {
     }
 }
 
-fn encode<'a>(env: Env<'a>, value: &Value) -> Term<'a> {
+enum EncodeFrame<'v, 'a> {
+    Array {
+        items: std::slice::Iter<'v, Value>,
+        terms: Vec<Term<'a>>,
+    },
+    Object {
+        entries: ObjectMapIter<'v>,
+        keys: Vec<Term<'a>>,
+        values: Vec<Term<'a>>,
+    },
+}
+
+impl<'v, 'a> EncodeFrame<'v, 'a> {
+    fn accept(&mut self, term: Term<'a>) {
+        match self {
+            EncodeFrame::Array { terms, .. } => terms.push(term),
+            EncodeFrame::Object { values, .. } => values.push(term),
+        }
+    }
+
+    fn next_child(&mut self, env: Env<'a>) -> Option<&'v Value> {
+        match self {
+            EncodeFrame::Array { items, .. } => items.next(),
+            EncodeFrame::Object { entries, keys, .. } => {
+                let (k, v) = entries.next()?;
+                keys.push(encode_binary(env, k.as_str().as_bytes()));
+                Some(v)
+            }
+        }
+    }
+
+    fn finish(self, env: Env<'a>) -> Term<'a> {
+        match self {
+            EncodeFrame::Array { terms, .. } => terms.encode(env),
+            EncodeFrame::Object { keys, values, .. } => {
+                Term::map_from_term_arrays(env, &keys, &values).expect("unique keys")
+            }
+        }
+    }
+}
+
+fn encode<'a>(env: Env<'a>, root: &Value) -> Term<'a> {
+    let mut stack: Vec<EncodeFrame> = Vec::new();
+    let mut next = root;
+    loop {
+        let mut ready = match next {
+            Value::Array(items) => {
+                stack.push(EncodeFrame::Array {
+                    items: items.iter(),
+                    terms: Vec::with_capacity(items.len()),
+                });
+                None
+            }
+            Value::Object(map) => {
+                stack.push(EncodeFrame::Object {
+                    entries: map.iter(),
+                    keys: Vec::with_capacity(map.len()),
+                    values: Vec::with_capacity(map.len()),
+                });
+                None
+            }
+            scalar => Some(encode_scalar(env, scalar)),
+        };
+
+        loop {
+            let Some(top) = stack.last_mut() else {
+                return ready.expect("root term");
+            };
+            if let Some(term) = ready.take() {
+                top.accept(term);
+            }
+            if let Some(child) = top.next_child(env) {
+                next = child;
+                break;
+            }
+            ready = stack.pop().map(|frame| frame.finish(env));
+        }
+    }
+}
+
+#[inline(never)]
+fn encode_scalar<'a>(env: Env<'a>, value: &Value) -> Term<'a> {
     match value {
         Value::Bytes(bytes) => encode_binary(env, bytes),
         Value::String(string) => encode_binary(env, string.as_bytes()),
@@ -168,20 +402,12 @@ fn encode<'a>(env: Env<'a>, value: &Value) -> Term<'a> {
         Value::Float(f) => f.into_inner().encode(env),
         Value::Boolean(b) => b.encode(env),
         Value::Timestamp(ts) => ElixirDateTime::from_utc(ts).encode(env),
-        Value::Object(map) => {
-            let keys: Vec<_> = map.keys().map(|k| k.as_str().encode(env)).collect();
-            let values: Vec<_> = map.values().map(|v| encode(env, v)).collect();
-            Term::map_from_term_arrays(env, &keys, &values).expect("unique keys")
-        }
-        Value::Array(items) => items
-            .iter()
-            .map(|v| encode(env, v))
-            .collect::<Vec<_>>()
-            .encode(env),
         Value::Null => atoms::nil().encode(env),
+        Value::Object(_) | Value::Array(_) => unreachable!("containers are encoded by encode"),
     }
 }
 
+#[inline(never)]
 fn encode_binary<'a>(env: Env<'a>, bytes: &[u8]) -> Term<'a> {
     let mut binary = NewBinary::new(env, bytes.len());
     binary.as_mut_slice().copy_from_slice(bytes);

@@ -33,6 +33,16 @@ defmodule VRL do
   @type event :: term()
   @type run_error :: String.t() | {:abort, String.t()}
 
+  @max_depth 128
+
+  @doc """
+  Maximum nesting of maps and lists accepted by and returned from `run/2`.
+
+  Deeper values return `{:error, "maximum nesting depth of 128 exceeded"}`.
+  """
+  @spec max_depth() :: pos_integer()
+  def max_depth, do: @max_depth
+
   @doc """
   Compiles VRL `source` into a reusable `VRL.Program`.
 

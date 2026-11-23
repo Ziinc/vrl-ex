@@ -17,6 +17,16 @@ defmodule VRLTest do
       assert message =~ "call to undefined function"
     end
 
+    test "returns error for non-UTF8 source" do
+      assert {:error, "source must be valid UTF-8"} = VRL.compile(<<255, 254>>)
+    end
+
+    test "handles deeply nested source without crashing" do
+      source = String.duplicate("[", 1_000) <> "1" <> String.duplicate("]", 1_000)
+      assert {status, _} = VRL.compile(source)
+      assert status in [:ok, :error]
+    end
+
     test "requires fallible calls to be handled" do
       assert {:error, message} = VRL.compile(~s(parse_json("{}"\)))
       assert message =~ "unhandled error"
@@ -129,9 +139,34 @@ defmodule VRLTest do
       assert message =~ "unsupported term"
     end
 
+    test "returns error for improper lists", %{identity: p} do
+      assert {:error, message} = VRL.run(p, [1, 2 | 3])
+      assert message =~ "unsupported term"
+    end
+
+    test "round-trips values nested up to the depth limit", %{identity: p} do
+      event = nest(VRL.max_depth())
+      assert {:ok, %VRL.Result{value: ^event}} = VRL.run(p, event)
+    end
+
+    test "returns error for input nested beyond the depth limit", %{identity: p} do
+      for wrap <- [&[&1], &%{"a" => &1}] do
+        event = nest(VRL.max_depth() + 1, wrap)
+        assert {:error, "maximum nesting depth of 128 exceeded"} = VRL.run(p, event)
+      end
+    end
+
+    test "returns error for output nested beyond the depth limit" do
+      n = VRL.max_depth() + 1
+      {:ok, p} = VRL.compile(String.duplicate("[", n) <> "1" <> String.duplicate("]", n))
+      assert {:error, "maximum nesting depth of 128 exceeded"} = VRL.run(p)
+    end
+
     test "returns error for integers outside i64", %{identity: p} do
       assert {:error, message} = VRL.run(p, 2 ** 64)
       assert message =~ "unsupported term"
     end
   end
+
+  defp nest(n, wrap \\ &[&1]), do: Enum.reduce(1..n, 1, fn _, acc -> wrap.(acc) end)
 end

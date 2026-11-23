@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 chrono = { version = "0.4", default-features = false }
 rustler = "0.38"
+stacker = "0.1"
 vrl = { version = "0.39", default-features = false, features = [
   "compiler",
   "stdlib-base",
