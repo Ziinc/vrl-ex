@@ -26,18 +26,20 @@ defmodule VRLTest do
   describe "run/2" do
     test "returns the resolved value and the transformed event" do
       {:ok, program} = VRL.compile(~s(.b = upcase(string!(.a\)\); "done"))
-      assert {:ok, "done", %{"a" => "x", "b" => "X"}} = VRL.run(program, %{"a" => "x"})
+
+      assert {:ok, %VRL.Result{value: "done", event: %{"a" => "x", "b" => "X"}}} =
+               VRL.run(program, %{"a" => "x"})
     end
 
     test "program can be reused across runs" do
       {:ok, program} = VRL.compile(".n = int!(.n) + 1")
-      assert {:ok, 2, %{"n" => 2}} = VRL.run(program, %{"n" => 1})
-      assert {:ok, 11, %{"n" => 11}} = VRL.run(program, %{"n" => 10})
+      assert {:ok, %VRL.Result{value: 2, event: %{"n" => 2}}} = VRL.run(program, %{"n" => 1})
+      assert {:ok, %VRL.Result{value: 11, event: %{"n" => 11}}} = VRL.run(program, %{"n" => 10})
     end
 
     test "defaults to an empty event" do
       {:ok, program} = VRL.compile(".")
-      assert {:ok, %{}, %{}} = VRL.run(program)
+      assert {:ok, %VRL.Result{value: %{}, event: %{}}} = VRL.run(program)
     end
 
     test "returns runtime errors" do
@@ -61,31 +63,35 @@ defmodule VRLTest do
 
     test "round-trips scalars", %{identity: p} do
       for v <- ["str", "", 42, -7, 1.5, true, false, nil] do
-        assert {:ok, ^v, ^v} = VRL.run(p, v)
+        assert {:ok, %VRL.Result{value: ^v, event: ^v}} = VRL.run(p, v)
       end
     end
 
     test "round-trips nested maps and lists", %{identity: p} do
       event = %{"a" => [1, %{"b" => [nil, "c"]}], "d" => %{}}
-      assert {:ok, ^event, ^event} = VRL.run(p, event)
+      assert {:ok, %VRL.Result{value: ^event, event: ^event}} = VRL.run(p, event)
     end
 
     test "round-trips non-UTF8 binaries", %{identity: p} do
-      assert {:ok, <<255, 0>>, _} = VRL.run(p, <<255, 0>>)
+      assert {:ok, %VRL.Result{value: <<255, 0>>}} = VRL.run(p, <<255, 0>>)
     end
 
     test "converts atom keys and values to strings", %{identity: p} do
-      assert {:ok, %{"a" => "b"}, _} = VRL.run(p, %{a: :b})
+      assert {:ok, %VRL.Result{value: %{"a" => "b"}}} = VRL.run(p, %{a: :b})
     end
 
     test "converts DateTime to a VRL timestamp" do
       {:ok, program} = VRL.compile("is_timestamp(.t)")
-      assert {:ok, true, _} = VRL.run(program, %{"t" => ~U[2024-01-02 03:04:05.123456Z]})
+
+      assert {:ok, %VRL.Result{value: true}} =
+               VRL.run(program, %{"t" => ~U[2024-01-02 03:04:05.123456Z]})
     end
 
     test "round-trips UTC DateTime at microsecond precision", %{identity: p} do
       dt = ~U[2024-01-02 03:04:05.123456Z]
-      assert {:ok, %{"t" => ^dt}, %{"t" => ^dt}} = VRL.run(p, %{"t" => dt})
+
+      assert {:ok, %VRL.Result{value: %{"t" => ^dt}, event: %{"t" => ^dt}}} =
+               VRL.run(p, %{"t" => dt})
     end
 
     test "shifts non-UTC DateTime to UTC", %{identity: p} do
@@ -103,18 +109,18 @@ defmodule VRLTest do
         zone_abbr: "+08"
       }
 
-      assert {:ok, out, _} = VRL.run(p, dt)
+      assert {:ok, %VRL.Result{value: out}} = VRL.run(p, dt)
       assert out == ~U[2024-01-02 03:04:05.000000Z]
     end
 
     test "returns timestamps as UTC DateTime truncated to microseconds" do
       {:ok, program} = VRL.compile("t'2024-01-02T03:04:05.123456789+01:00'")
-      assert {:ok, ~U[2024-01-02 02:04:05.123456Z], _} = VRL.run(program)
+      assert {:ok, %VRL.Result{value: ~U[2024-01-02 02:04:05.123456Z]}} = VRL.run(program)
     end
 
     test "returns now() as DateTime" do
       {:ok, program} = VRL.compile("now()")
-      assert {:ok, %DateTime{time_zone: "Etc/UTC"} = dt, _} = VRL.run(program)
+      assert {:ok, %VRL.Result{value: %DateTime{time_zone: "Etc/UTC"} = dt}} = VRL.run(program)
       assert abs(DateTime.diff(dt, DateTime.utc_now())) < 5
     end
 

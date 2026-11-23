@@ -8,7 +8,7 @@ defmodule VRL do
 
       iex> {:ok, program} = VRL.compile(".message = upcase!(.message)")
       iex> VRL.run(program, %{"message" => "hello"})
-      {:ok, "HELLO", %{"message" => "HELLO"}}
+      {:ok, %VRL.Result{value: "HELLO", event: %{"message" => "HELLO"}}}
 
   ## Value conversion
 
@@ -28,7 +28,7 @@ defmodule VRL do
   Timestamps are returned as UTC `DateTime`s with microsecond precision.
   """
 
-  alias VRL.Program
+  alias VRL.{Program, Result}
 
   @type event :: term()
   @type run_error :: String.t() | {:abort, String.t()}
@@ -49,12 +49,14 @@ defmodule VRL do
   @doc """
   Runs a compiled `program` against `event`.
 
-  Returns `{:ok, value, event}` where `value` is the result of the program's
-  last expression and `event` is the transformed event. Returns
-  `{:error, {:abort, message}}` when the program calls `abort`.
+  Returns `{:ok, %VRL.Result{}}` with the program's resulting value and the
+  transformed event. Returns `{:error, {:abort, message}}` when the program
+  calls `abort`.
   """
-  @spec run(Program.t(), event()) :: {:ok, term(), event()} | {:error, run_error()}
+  @spec run(Program.t(), event()) :: {:ok, Result.t()} | {:error, run_error()}
   def run(%Program{ref: ref}, event \\ %{}) do
-    VRL.Native.run(ref, event)
+    with {:ok, value, event} <- VRL.Native.run(ref, event) do
+      {:ok, %Result{value: value, event: event}}
+    end
   end
 end

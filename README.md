@@ -23,7 +23,7 @@ To build the NIF from source, add `{:rustler, ">= 0.0.0"}` to your deps and set 
 .processed_at = now()
 """)
 
-{:ok, _value, event} = VRL.run(program, %{"message" => "hello"})
+{:ok, %VRL.Result{event: event}} = VRL.run(program, %{"message" => "hello"})
 event["message"]
 #=> "HELLO"
 ```
