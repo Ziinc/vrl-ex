@@ -1,6 +1,8 @@
+use chrono::{DateTime, Datelike, NaiveDate, TimeDelta, Timelike, Utc};
 use rustler::types::map::MapIterator;
 use rustler::{
-    Binary, Encoder, Env, Error, ListIterator, NewBinary, NifResult, ResourceArc, Term, TermType,
+    Atom, Binary, Encoder, Env, Error, ListIterator, NewBinary, NifResult, NifStruct, ResourceArc,
+    Term, TermType,
 };
 use vrl::compiler::runtime::{Runtime, Terminate};
 use vrl::compiler::state::RuntimeState;
@@ -9,7 +11,55 @@ use vrl::diagnostic::Formatter;
 use vrl::value::{KeyString, ObjectMap, Secrets, Value};
 
 mod atoms {
-    rustler::atoms! { ok, error, abort, nil }
+    rustler::atoms! { ok, error, abort, nil, calendar_iso = "Elixir.Calendar.ISO" }
+}
+
+#[derive(NifStruct)]
+#[module = "DateTime"]
+struct ElixirDateTime {
+    calendar: Atom,
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    microsecond: (u32, u32),
+    utc_offset: i64,
+    std_offset: i64,
+    time_zone: String,
+    zone_abbr: String,
+}
+
+impl ElixirDateTime {
+    fn to_utc(&self) -> Option<DateTime<Utc>> {
+        let naive = NaiveDate::from_ymd_opt(self.year, self.month, self.day)?.and_hms_micro_opt(
+            self.hour,
+            self.minute,
+            self.second,
+            self.microsecond.0,
+        )?;
+        let offset = TimeDelta::try_seconds(self.utc_offset + self.std_offset)?;
+        Some(naive.checked_sub_signed(offset)?.and_utc())
+    }
+
+    fn from_utc(ts: &DateTime<Utc>) -> Self {
+        Self {
+            calendar: atoms::calendar_iso(),
+            year: ts.year(),
+            month: ts.month(),
+            day: ts.day(),
+            hour: ts.hour(),
+            minute: ts.minute(),
+            second: ts.second(),
+            // Leap seconds carry the extra second in the fraction.
+            microsecond: (ts.timestamp_subsec_micros().min(999_999), 6),
+            utc_offset: 0,
+            std_offset: 0,
+            time_zone: "Etc/UTC".to_owned(),
+            zone_abbr: "UTC".to_owned(),
+        }
+    }
 }
 
 pub struct ProgramResource(Program);
@@ -83,11 +133,17 @@ fn decode(term: Term) -> NifResult<Value> {
             .map(decode)
             .collect::<NifResult<Vec<_>>>()
             .map(Value::Array),
-        TermType::Map => MapIterator::new(term)
-            .ok_or(Error::BadArg)?
-            .map(|(k, v)| Ok((decode_key(k)?, decode(v)?)))
-            .collect::<NifResult<ObjectMap>>()
-            .map(Value::Object),
+        TermType::Map => match term.decode::<ElixirDateTime>() {
+            Ok(dt) => dt
+                .to_utc()
+                .map(Value::Timestamp)
+                .ok_or_else(|| unsupported(term)),
+            Err(_) => MapIterator::new(term)
+                .ok_or(Error::BadArg)?
+                .map(|(k, v)| Ok((decode_key(k)?, decode(v)?)))
+                .collect::<NifResult<ObjectMap>>()
+                .map(Value::Object),
+        },
         _ => Err(unsupported(term)),
     }
 }
@@ -111,7 +167,7 @@ fn encode<'a>(env: Env<'a>, value: &Value) -> Term<'a> {
         Value::Integer(i) => i.encode(env),
         Value::Float(f) => f.into_inner().encode(env),
         Value::Boolean(b) => b.encode(env),
-        Value::Timestamp(ts) => ts.to_rfc3339().encode(env),
+        Value::Timestamp(ts) => ElixirDateTime::from_utc(ts).encode(env),
         Value::Object(map) => {
             let keys: Vec<_> = map.keys().map(|k| k.as_str().encode(env)).collect();
             let values: Vec<_> = map.values().map(|v| encode(env, v)).collect();

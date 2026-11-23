@@ -21,9 +21,11 @@ defmodule VRL do
   | `nil`                    | null      |
   | map                      | object    |
   | list                     | array     |
+  | `DateTime`               | timestamp |
   | other atoms              | string    |
 
   Map keys may be binaries or atoms; returned maps always have binary keys.
+  Timestamps are returned as UTC `DateTime`s with microsecond precision.
   """
 
   alias VRL.Program

@@ -9,6 +9,7 @@ name = "vrl_nif"
 crate-type = ["cdylib"]
 
 [dependencies]
+chrono = { version = "0.4", default-features = false }
 rustler = "0.38"
 vrl = { version = "0.39", default-features = false, features = [
   "compiler",

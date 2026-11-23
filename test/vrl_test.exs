@@ -78,6 +78,46 @@ defmodule VRLTest do
       assert {:ok, %{"a" => "b"}, _} = VRL.run(p, %{a: :b})
     end
 
+    test "converts DateTime to a VRL timestamp" do
+      {:ok, program} = VRL.compile("is_timestamp(.t)")
+      assert {:ok, true, _} = VRL.run(program, %{"t" => ~U[2024-01-02 03:04:05.123456Z]})
+    end
+
+    test "round-trips UTC DateTime at microsecond precision", %{identity: p} do
+      dt = ~U[2024-01-02 03:04:05.123456Z]
+      assert {:ok, %{"t" => ^dt}, %{"t" => ^dt}} = VRL.run(p, %{"t" => dt})
+    end
+
+    test "shifts non-UTC DateTime to UTC", %{identity: p} do
+      dt = %DateTime{
+        year: 2024,
+        month: 1,
+        day: 2,
+        hour: 11,
+        minute: 4,
+        second: 5,
+        microsecond: {0, 0},
+        utc_offset: 28_800,
+        std_offset: 0,
+        time_zone: "Asia/Singapore",
+        zone_abbr: "+08"
+      }
+
+      assert {:ok, out, _} = VRL.run(p, dt)
+      assert out == ~U[2024-01-02 03:04:05.000000Z]
+    end
+
+    test "returns timestamps as UTC DateTime truncated to microseconds" do
+      {:ok, program} = VRL.compile("t'2024-01-02T03:04:05.123456789+01:00'")
+      assert {:ok, ~U[2024-01-02 02:04:05.123456Z], _} = VRL.run(program)
+    end
+
+    test "returns now() as DateTime" do
+      {:ok, program} = VRL.compile("now()")
+      assert {:ok, %DateTime{time_zone: "Etc/UTC"} = dt, _} = VRL.run(program)
+      assert abs(DateTime.diff(dt, DateTime.utc_now())) < 5
+    end
+
     test "returns error for unsupported terms", %{identity: p} do
       assert {:error, message} = VRL.run(p, %{"pid" => self()})
       assert message =~ "unsupported term"
