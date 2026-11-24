@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       MIX_ENV: test
+      VRL_BUILD: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: erlef/setup-beam@v1

@@ -1,7 +1,7 @@
 defmodule VRL.MixProject do
   use Mix.Project
 
-  @version "0.1.0-dev"
+  @version "0.1.0"
   @source_url "https://github.com/Ziinc/vrl-ex"
 
   def project do
@@ -34,7 +34,7 @@ defmodule VRL.MixProject do
       licenses: ["MPL-2.0"],
       links: %{"GitHub" => @source_url, "VRL" => "https://vrl.dev"},
       files:
-        ~w(lib native/vrl_nif/.cargo native/vrl_nif/src native/vrl_nif/Cargo.* mix.exs README.md checksum-*.exs)
+        ~w(lib native/vrl_nif/.cargo native/vrl_nif/src native/vrl_nif/Cargo.* mix.exs README.md CHANGELOG.md checksum-*.exs)
     ]
   end
 end
