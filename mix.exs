@@ -8,7 +8,7 @@ defmodule VRL.MixProject do
     [
       app: :vrl,
       version: @version,
-      elixir: "~> 1.15",
+      elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description: "Elixir bindings for Vector Remap Language (VRL)",
@@ -18,9 +18,7 @@ defmodule VRL.MixProject do
     ]
   end
 
-  def application do
-    [extra_applications: [:logger]]
-  end
+  def application, do: []
 
   defp deps do
     [

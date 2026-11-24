@@ -3,7 +3,7 @@ defmodule VRL do
   Elixir bindings for [Vector Remap Language](https://vrl.dev).
 
   Compile a program once with `compile/1`, then run it against many events
-  with `run/2`. The full VRL standard library is available, except for
+  with `run/3`. The full VRL standard library is available, except for
   network functions.
 
       iex> {:ok, program} = VRL.compile(".message = upcase!(.message)")
@@ -49,7 +49,7 @@ defmodule VRL do
   @default_timeout 5_000
 
   @doc """
-  Maximum nesting of maps and lists accepted by and returned from `run/2`.
+  Maximum nesting of maps and lists accepted by and returned from `run/3`.
 
   Deeper values return `{:error, "maximum nesting depth of 128 exceeded"}`.
   """
@@ -87,22 +87,19 @@ defmodule VRL do
   @spec run(Program.t(), event(), keyword()) ::
           {:ok, Result.t()} | {:error, run_error() | :timeout}
   def run(%Program{ref: ref}, event \\ %{}, opts \\ []) do
-    timeout =
-      case Keyword.get(opts, :timeout, @default_timeout) do
-        :infinity ->
-          nil
-
-        ms when is_integer(ms) and ms >= 0 ->
-          ms
-
-        other ->
-          raise ArgumentError,
-                "expected :timeout to be a non-negative integer or :infinity, got: #{inspect(other)}"
-      end
+    opts = Keyword.validate!(opts, timeout: @default_timeout, strip_structs: false)
 
     with {:ok, value, event} <-
-           VRL.Native.run(ref, event, timeout, Keyword.get(opts, :strip_structs, false) == true) do
+           VRL.Native.run(ref, event, timeout_ms(opts[:timeout]), opts[:strip_structs] == true) do
       {:ok, %Result{value: value, event: event}}
     end
+  end
+
+  defp timeout_ms(:infinity), do: nil
+  defp timeout_ms(ms) when is_integer(ms) and ms >= 0, do: ms
+
+  defp timeout_ms(other) do
+    raise ArgumentError,
+          "expected :timeout to be a non-negative integer or :infinity, got: #{inspect(other)}"
   end
 end

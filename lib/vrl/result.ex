@@ -1,6 +1,6 @@
 defmodule VRL.Result do
   @moduledoc """
-  The outcome of a successful `VRL.run/2`.
+  The outcome of a successful `VRL.run/3`.
 
     * `:value` - the result of the program's last expression
     * `:event` - the event after the program's modifications

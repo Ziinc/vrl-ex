@@ -65,9 +65,8 @@ impl ElixirDateTime {
     }
 }
 
-/// Dirty scheduler stacks are ~320KB; VRL's recursive parser and evaluator
-/// overflow them on deeply nested input, so VRL work runs on a larger stack.
-/// The memory is reserved, not committed, until touched.
+/// VRL recurses deeply on nested input, overflowing ~320KB dirty scheduler
+/// stacks, so it runs on this larger (lazily committed) stack.
 const STACK_SIZE: usize = 256 * 1024 * 1024;
 
 /// Maximum container nesting accepted from and returned to Elixir.
@@ -125,8 +124,8 @@ fn run<'a>(
 ) -> NifResult<Term<'a>> {
     let value = decode(event, strip_structs)?;
     let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
-    // VRL calls this between expressions; a single long function call can overrun.
-    // Reading the clock every expression costs ~70% in tight loops, so sample it.
+    // Called between expressions; the clock is sampled as reading it every
+    // expression slows tight loops by ~70%.
     let mut checkpoints: u32 = 0;
     let mut control = move || {
         checkpoints = checkpoints.wrapping_add(1);
@@ -185,25 +184,17 @@ fn too_deep(value: &Value, depth: usize) -> bool {
     }
 }
 
-#[inline(never)]
-fn depth_error() -> Error {
-    Error::Term(Box::new(depth_message()))
-}
-
-#[inline(never)]
 fn unsupported(term: Term) -> Error {
     Error::Term(Box::new(format!("unsupported term: {term:?}")))
 }
 
-// decode and encode walk terms with an explicit heap stack instead of
-// recursion: they run on the small scheduler stack, where ERTS calls must stay.
-// Frames live in a heap Vec; MapIterator alone is ~288 bytes.
-#[allow(clippy::large_enum_variant)]
+// decode/encode use an explicit heap stack, not recursion: they call ERTS, so
+// they must stay on the small scheduler stack.
+#[allow(clippy::large_enum_variant)] // frames live on the heap
 enum DecodeFrame<'a> {
     List {
         items: Vec<Value>,
         tail: Term<'a>,
-        whole: Term<'a>,
     },
     Map {
         map: ObjectMap,
@@ -224,11 +215,13 @@ impl<'a> DecodeFrame<'a> {
 
     fn next_child(&mut self, strip_structs: bool) -> NifResult<Option<Term<'a>>> {
         match self {
-            DecodeFrame::List { tail, whole, .. } => {
+            DecodeFrame::List { tail, .. } => {
                 if tail.is_empty_list() {
                     return Ok(None);
                 }
-                let (head, rest) = tail.list_get_cell().map_err(|_| unsupported(*whole))?;
+                let (head, rest) = tail
+                    .list_get_cell()
+                    .map_err(|_| Error::Term(Box::new("unsupported term: improper list")))?;
                 *tail = rest;
                 Ok(Some(head))
             }
@@ -261,12 +254,11 @@ fn decode(root: Term, strip_structs: bool) -> NifResult<Value> {
         let mut ready = if !is_list && !next.is_map() {
             Some(decode_scalar(next)?)
         } else if stack.len() >= MAX_DEPTH {
-            return Err(depth_error());
+            return Err(Error::Term(Box::new(depth_message())));
         } else if is_list {
             stack.push(DecodeFrame::List {
                 items: Vec::new(),
                 tail: next,
-                whole: next,
             });
             None
         } else if let Some(timestamp) = decode_datetime(next) {
@@ -296,7 +288,6 @@ fn decode(root: Term, strip_structs: bool) -> NifResult<Value> {
     }
 }
 
-#[inline(never)]
 fn decode_scalar(term: Term) -> NifResult<Value> {
     match term.get_type() {
         TermType::Binary => Ok(Value::from(term.decode::<Binary>()?.as_slice())),
@@ -318,7 +309,6 @@ fn decode_scalar(term: Term) -> NifResult<Value> {
     }
 }
 
-#[inline(never)]
 fn decode_datetime(term: Term) -> Option<NifResult<Value>> {
     let dt = term.decode::<ElixirDateTime>().ok()?;
     Some(
@@ -328,7 +318,6 @@ fn decode_datetime(term: Term) -> Option<NifResult<Value>> {
     )
 }
 
-#[inline(never)]
 fn decode_key(term: Term) -> NifResult<KeyString> {
     match term.get_type() {
         TermType::Binary => Ok(term
@@ -420,7 +409,6 @@ fn encode<'a>(env: Env<'a>, root: &Value) -> Term<'a> {
     }
 }
 
-#[inline(never)]
 fn encode_scalar<'a>(env: Env<'a>, value: &Value) -> Term<'a> {
     match value {
         Value::Bytes(bytes) => encode_binary(env, bytes),
@@ -435,7 +423,6 @@ fn encode_scalar<'a>(env: Env<'a>, value: &Value) -> Term<'a> {
     }
 }
 
-#[inline(never)]
 fn encode_binary<'a>(env: Env<'a>, bytes: &[u8]) -> Term<'a> {
     let mut binary = NewBinary::new(env, bytes.len());
     binary.as_mut_slice().copy_from_slice(bytes);

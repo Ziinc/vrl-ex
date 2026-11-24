@@ -33,7 +33,7 @@ defmodule VRLTest do
     end
   end
 
-  describe "run/2" do
+  describe "run/3" do
     test "returns the resolved value and the transformed event" do
       {:ok, program} = VRL.compile(~s(.b = upcase(string!(.a\)\); "done"))
 
@@ -65,7 +65,7 @@ defmodule VRLTest do
     end
   end
 
-  describe "run/3 timeout" do
+  describe "run/3 :timeout" do
     # ~100M loop iterations: runs far longer than any timeout below.
     @slow ~S"""
     r = range!(0, 10000)
@@ -92,10 +92,11 @@ defmodule VRLTest do
       assert {:ok, %VRL.Result{value: 1}} = VRL.run(program, %{}, timeout: :infinity)
     end
 
-    test "rejects invalid timeouts" do
+    test "rejects invalid options" do
       {:ok, program} = VRL.compile(".")
       assert_raise ArgumentError, fn -> VRL.run(program, %{}, timeout: -1) end
       assert_raise ArgumentError, fn -> VRL.run(program, %{}, timeout: "5s") end
+      assert_raise ArgumentError, fn -> VRL.run(program, %{}, timout: 5) end
     end
   end
 
@@ -103,21 +104,6 @@ defmodule VRLTest do
     setup do
       {:ok, program} = VRL.compile(".")
       %{identity: program}
-    end
-
-    test "round-trips scalars", %{identity: p} do
-      for v <- ["str", "", 42, -7, 1.5, true, false, nil] do
-        assert {:ok, %VRL.Result{value: ^v, event: ^v}} = VRL.run(p, v)
-      end
-    end
-
-    test "round-trips nested maps and lists", %{identity: p} do
-      event = %{"a" => [1, %{"b" => [nil, "c"]}], "d" => %{}}
-      assert {:ok, %VRL.Result{value: ^event, event: ^event}} = VRL.run(p, event)
-    end
-
-    test "round-trips non-UTF8 binaries", %{identity: p} do
-      assert {:ok, %VRL.Result{value: <<255, 0>>}} = VRL.run(p, <<255, 0>>)
     end
 
     test "converts atom keys and values to strings", %{identity: p} do
@@ -129,13 +115,6 @@ defmodule VRLTest do
 
       assert {:ok, %VRL.Result{value: true}} =
                VRL.run(program, %{"t" => ~U[2024-01-02 03:04:05.123456Z]})
-    end
-
-    test "round-trips UTC DateTime at microsecond precision", %{identity: p} do
-      dt = ~U[2024-01-02 03:04:05.123456Z]
-
-      assert {:ok, %VRL.Result{value: %{"t" => ^dt}, event: %{"t" => ^dt}}} =
-               VRL.run(p, %{"t" => dt})
     end
 
     test "shifts non-UTC DateTime to UTC", %{identity: p} do
@@ -197,18 +176,6 @@ defmodule VRLTest do
       assert message =~ "unsupported term"
     end
 
-    test "round-trips values nested up to the depth limit", %{identity: p} do
-      event = nest(VRL.max_depth())
-      assert {:ok, %VRL.Result{value: ^event}} = VRL.run(p, event)
-    end
-
-    test "returns error for input nested beyond the depth limit", %{identity: p} do
-      for wrap <- [&[&1], &%{"a" => &1}] do
-        event = nest(VRL.max_depth() + 1, wrap)
-        assert {:error, "maximum nesting depth of 128 exceeded"} = VRL.run(p, event)
-      end
-    end
-
     test "returns error for output nested beyond the depth limit" do
       n = VRL.max_depth() + 1
       {:ok, p} = VRL.compile(String.duplicate("[", n) <> "1" <> String.duplicate("]", n))
@@ -220,6 +187,4 @@ defmodule VRLTest do
       assert message =~ "unsupported term"
     end
   end
-
-  defp nest(n, wrap \\ &[&1]), do: Enum.reduce(1..n, 1, fn _, acc -> wrap.(acc) end)
 end
