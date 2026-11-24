@@ -1,4 +1,6 @@
 use std::mem::ManuallyDrop;
+use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Datelike, NaiveDate, TimeDelta, Timelike, Utc};
 use rustler::types::map::MapIterator;
@@ -12,7 +14,7 @@ use vrl::diagnostic::Formatter;
 use vrl::value::{KeyString, ObjectMap, ObjectMapIter, Secrets, Value};
 
 mod atoms {
-    rustler::atoms! { ok, error, abort, nil, calendar_iso = "Elixir.Calendar.ISO" }
+    rustler::atoms! { ok, error, abort, timeout, nil, calendar_iso = "Elixir.Calendar.ISO" }
 }
 
 #[derive(NifStruct)]
@@ -110,6 +112,7 @@ enum Outcome {
     Ok(Value, Value),
     Abort(String),
     Error(String),
+    Timeout,
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -117,8 +120,22 @@ fn run<'a>(
     env: Env<'a>,
     program: ResourceArc<ProgramResource>,
     event: Term<'a>,
+    timeout_ms: Option<u64>,
 ) -> NifResult<Term<'a>> {
     let value = decode(event)?;
+    let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
+    // VRL calls this between expressions; a single long function call can overrun.
+    // Reading the clock every expression costs ~70% in tight loops, so sample it.
+    let mut checkpoints: u32 = 0;
+    let mut control = move || {
+        checkpoints = checkpoints.wrapping_add(1);
+        match deadline {
+            Some(deadline) if checkpoints.is_multiple_of(256) && Instant::now() >= deadline => {
+                ControlFlow::Break(())
+            }
+            _ => ControlFlow::Continue(()),
+        }
+    };
 
     // Only pure Rust runs on the grown stack; ERTS calls stay on the scheduler stack.
     let outcome = stacker::grow(STACK_SIZE, move || {
@@ -128,12 +145,18 @@ fn run<'a>(
             secrets: Secrets::default(),
         };
         let mut runtime = Runtime::new(RuntimeState::default());
-        match runtime.resolve(&mut target, &program.0, &TimeZone::default()) {
+        match runtime.resolve_with_control(
+            &mut target,
+            &program.0,
+            &TimeZone::default(),
+            &mut control,
+        ) {
             Ok(value) if too_deep(&value, 0) || too_deep(&target.value, 0) => {
                 Outcome::Error(depth_message())
             }
             Ok(value) => Outcome::Ok(value, target.value),
             Err(Terminate::Abort(err)) => Outcome::Abort(err.to_string()),
+            Err(Terminate::Interrupted) => Outcome::Timeout,
             Err(err) => Outcome::Error(err.to_string()),
         }
     });
@@ -144,6 +167,7 @@ fn run<'a>(
         }
         Outcome::Abort(message) => (atoms::error(), (atoms::abort(), message)).encode(env),
         Outcome::Error(message) => (atoms::error(), message).encode(env),
+        Outcome::Timeout => (atoms::error(), atoms::timeout()).encode(env),
     })
 }
 

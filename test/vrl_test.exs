@@ -65,6 +65,40 @@ defmodule VRLTest do
     end
   end
 
+  describe "run/3 timeout" do
+    # ~100M loop iterations: runs far longer than any timeout below.
+    @slow ~S"""
+    r = range!(0, 10000)
+    for_each(r) -> |_i, _v| { for_each(r) -> |_j, _w| { 1 } }
+    """
+
+    test "interrupts programs exceeding the timeout" do
+      {:ok, program} = VRL.compile(@slow)
+      {micros, result} = :timer.tc(fn -> VRL.run(program, %{}, timeout: 50) end)
+      assert result == {:error, :timeout}
+      assert micros < 1_000_000
+    end
+
+    test "defaults to a 5 second timeout" do
+      {:ok, program} = VRL.compile(@slow)
+      {micros, result} = :timer.tc(fn -> VRL.run(program) end)
+      assert result == {:error, :timeout}
+      assert micros in 5_000_000..6_000_000
+    end
+
+    test "completes programs within the timeout" do
+      {:ok, program} = VRL.compile(".a = 1")
+      assert {:ok, %VRL.Result{value: 1}} = VRL.run(program, %{}, timeout: 50)
+      assert {:ok, %VRL.Result{value: 1}} = VRL.run(program, %{}, timeout: :infinity)
+    end
+
+    test "rejects invalid timeouts" do
+      {:ok, program} = VRL.compile(".")
+      assert_raise ArgumentError, fn -> VRL.run(program, %{}, timeout: -1) end
+      assert_raise ArgumentError, fn -> VRL.run(program, %{}, timeout: "5s") end
+    end
+  end
+
   describe "value conversion" do
     setup do
       {:ok, program} = VRL.compile(".")

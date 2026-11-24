@@ -34,6 +34,7 @@ defmodule VRL do
   @type run_error :: String.t() | {:abort, String.t()}
 
   @max_depth 128
+  @default_timeout 5_000
 
   @doc """
   Maximum nesting of maps and lists accepted by and returned from `run/2`.
@@ -61,11 +62,31 @@ defmodule VRL do
 
   Returns `{:ok, %VRL.Result{}}` with the program's resulting value and the
   transformed event. Returns `{:error, {:abort, message}}` when the program
-  calls `abort`.
+  calls `abort`, and `{:error, :timeout}` when it exceeds the timeout.
+
+  ## Options
+
+    * `:timeout` - maximum run time in milliseconds, or `:infinity`.
+      Defaults to `5000`. Checked between VRL expressions, so a single
+      long-running function call can overrun it.
   """
-  @spec run(Program.t(), event()) :: {:ok, Result.t()} | {:error, run_error()}
-  def run(%Program{ref: ref}, event \\ %{}) do
-    with {:ok, value, event} <- VRL.Native.run(ref, event) do
+  @spec run(Program.t(), event(), keyword()) ::
+          {:ok, Result.t()} | {:error, run_error() | :timeout}
+  def run(%Program{ref: ref}, event \\ %{}, opts \\ []) do
+    timeout =
+      case Keyword.get(opts, :timeout, @default_timeout) do
+        :infinity ->
+          nil
+
+        ms when is_integer(ms) and ms >= 0 ->
+          ms
+
+        other ->
+          raise ArgumentError,
+                "expected :timeout to be a non-negative integer or :infinity, got: #{inspect(other)}"
+      end
+
+    with {:ok, value, event} <- VRL.Native.run(ref, event, timeout) do
       {:ok, %Result{value: value, event: event}}
     end
   end
