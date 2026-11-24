@@ -28,6 +28,16 @@ defmodule VRL do
   Timestamps are returned as UTC `DateTime`s with microsecond precision.
   Other structs are passed as maps, keeping `"__struct__"` unless the
   `:strip_structs` option is set.
+
+  ## Integer overflow
+
+  VRL integer arithmetic (`+`, `-`, `*`) wraps around on 64-bit overflow
+  without an error or warning. This is upstream VRL behaviour:
+
+      iex> {:ok, program} = VRL.compile("9223372036854775807 + 1")
+      iex> {:ok, %VRL.Result{value: value}} = VRL.run(program)
+      iex> value
+      -9223372036854775808
   """
 
   alias VRL.{Program, Result}
