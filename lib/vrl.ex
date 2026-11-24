@@ -26,6 +26,8 @@ defmodule VRL do
 
   Map keys may be binaries or atoms; returned maps always have binary keys.
   Timestamps are returned as UTC `DateTime`s with microsecond precision.
+  Other structs are passed as maps, keeping `"__struct__"` unless the
+  `:strip_structs` option is set.
   """
 
   alias VRL.{Program, Result}
@@ -69,6 +71,8 @@ defmodule VRL do
     * `:timeout` - maximum run time in milliseconds, or `:infinity`.
       Defaults to `5000`. Checked between VRL expressions, so a single
       long-running function call can overrun it.
+    * `:strip_structs` - when `true`, structs other than `DateTime` are
+      passed as plain maps without the `"__struct__"` key. Defaults to `false`.
   """
   @spec run(Program.t(), event(), keyword()) ::
           {:ok, Result.t()} | {:error, run_error() | :timeout}
@@ -86,7 +90,8 @@ defmodule VRL do
                 "expected :timeout to be a non-negative integer or :infinity, got: #{inspect(other)}"
       end
 
-    with {:ok, value, event} <- VRL.Native.run(ref, event, timeout) do
+    with {:ok, value, event} <-
+           VRL.Native.run(ref, event, timeout, Keyword.get(opts, :strip_structs, false) == true) do
       {:ok, %Result{value: value, event: event}}
     end
   end

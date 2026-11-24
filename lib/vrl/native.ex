@@ -21,5 +21,5 @@ defmodule VRL.Native do
     )
 
   def compile(_source), do: :erlang.nif_error(:nif_not_loaded)
-  def run(_program, _event, _timeout_ms), do: :erlang.nif_error(:nif_not_loaded)
+  def run(_program, _event, _timeout_ms, _strip_structs), do: :erlang.nif_error(:nif_not_loaded)
 end

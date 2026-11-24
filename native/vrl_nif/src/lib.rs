@@ -14,7 +14,7 @@ use vrl::diagnostic::Formatter;
 use vrl::value::{KeyString, ObjectMap, ObjectMapIter, Secrets, Value};
 
 mod atoms {
-    rustler::atoms! { ok, error, abort, timeout, nil, calendar_iso = "Elixir.Calendar.ISO" }
+    rustler::atoms! { ok, error, abort, timeout, nil, __struct__, calendar_iso = "Elixir.Calendar.ISO" }
 }
 
 #[derive(NifStruct)]
@@ -121,8 +121,9 @@ fn run<'a>(
     program: ResourceArc<ProgramResource>,
     event: Term<'a>,
     timeout_ms: Option<u64>,
+    strip_structs: bool,
 ) -> NifResult<Term<'a>> {
-    let value = decode(event)?;
+    let value = decode(event, strip_structs)?;
     let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
     // VRL calls this between expressions; a single long function call can overrun.
     // Reading the clock every expression costs ~70% in tight loops, so sample it.
@@ -221,7 +222,7 @@ impl<'a> DecodeFrame<'a> {
         }
     }
 
-    fn next_child(&mut self) -> NifResult<Option<Term<'a>>> {
+    fn next_child(&mut self, strip_structs: bool) -> NifResult<Option<Term<'a>>> {
         match self {
             DecodeFrame::List { tail, whole, .. } => {
                 if tail.is_empty_list() {
@@ -231,13 +232,16 @@ impl<'a> DecodeFrame<'a> {
                 *tail = rest;
                 Ok(Some(head))
             }
-            DecodeFrame::Map { iter, key, .. } => match iter.next() {
-                Some((k, v)) => {
+            DecodeFrame::Map { iter, key, .. } => {
+                for (k, v) in iter.by_ref() {
+                    if strip_structs && k == atoms::__struct__().to_term(k.get_env()) {
+                        continue;
+                    }
                     *key = Some(decode_key(k)?);
-                    Ok(Some(v))
+                    return Ok(Some(v));
                 }
-                None => Ok(None),
-            },
+                Ok(None)
+            }
         }
     }
 
@@ -249,7 +253,7 @@ impl<'a> DecodeFrame<'a> {
     }
 }
 
-fn decode(root: Term) -> NifResult<Value> {
+fn decode(root: Term, strip_structs: bool) -> NifResult<Value> {
     let mut stack: Vec<DecodeFrame> = Vec::new();
     let mut next = root;
     loop {
@@ -283,7 +287,7 @@ fn decode(root: Term) -> NifResult<Value> {
             if let Some(value) = ready.take() {
                 top.accept(value);
             }
-            if let Some(child) = top.next_child()? {
+            if let Some(child) = top.next_child(strip_structs)? {
                 next = child;
                 break;
             }

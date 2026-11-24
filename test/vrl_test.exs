@@ -168,6 +168,25 @@ defmodule VRLTest do
       assert abs(DateTime.diff(dt, DateTime.utc_now())) < 5
     end
 
+    test "keeps __struct__ on non-DateTime structs by default", %{identity: p} do
+      assert {:ok, %VRL.Result{value: %{"__struct__" => "Elixir.URI", "host" => "x"}}} =
+               VRL.run(p, URI.parse("http://x"))
+    end
+
+    test "strip_structs: true removes __struct__ at any depth", %{identity: p} do
+      event = %{"uri" => URI.parse("http://x"), "list" => [~D[2024-01-02]]}
+
+      assert {:ok, %VRL.Result{value: value}} = VRL.run(p, event, strip_structs: true)
+      assert %{"uri" => %{"host" => "x"} = uri, "list" => [%{"year" => 2024} = date]} = value
+      refute Map.has_key?(uri, "__struct__")
+      refute Map.has_key?(date, "__struct__")
+    end
+
+    test "strip_structs: true still converts DateTime", %{identity: p} do
+      dt = ~U[2024-01-02 03:04:05.123456Z]
+      assert {:ok, %VRL.Result{value: ^dt}} = VRL.run(p, dt, strip_structs: true)
+    end
+
     test "returns error for unsupported terms", %{identity: p} do
       assert {:error, message} = VRL.run(p, %{"pid" => self()})
       assert message =~ "unsupported term"
