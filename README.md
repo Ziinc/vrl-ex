@@ -33,7 +33,10 @@ type mapping between Elixir terms and VRL values.
 
 ## Releasing
 
-1. Bump `@version` in `mix.exs`, commit, then tag and push: `git tag v0.1.0 && git push origin main --tags`.
-2. Wait for the "Build precompiled NIFs" workflow to attach all NIFs to the GitHub release.
-3. Generate the checksum file: `VRL_BUILD=1 mix rustler_precompiled.download VRL.Native --all --print`.
-4. Publish: `mix hex.publish`.
+Requires a `HEX_API_KEY` repository secret.
+
+1. Bump `@version` in `mix.exs`, update `CHANGELOG.md` and merge to `main`.
+2. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
+
+The Release workflow builds the NIFs, attaches them and the checksum file to the
+GitHub release, commits the checksum file to `main`, and publishes to Hex.

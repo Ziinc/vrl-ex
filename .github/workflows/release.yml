@@ -1,16 +1,24 @@
-name: Build precompiled NIFs
+name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build and publish, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
     name: NIF ${{ matrix.nif }} - ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -26,26 +34,79 @@ jobs:
           - { target: x86_64-pc-windows-msvc, os: windows-2022 }
     steps:
       - uses: actions/checkout@v5
-      - name: Read project version
-        shell: bash
-        run: echo "PROJECT_VERSION=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)" >> "$GITHUB_ENV"
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.job.target }}
+      - id: version
+        shell: bash
+        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
       - id: build-crate
-        uses: philss/rustler-precompiled-action@v1
+        uses: philss/rustler-precompiled-action@v1.1.5
         with:
           project-name: vrl_nif
-          project-version: ${{ env.PROJECT_VERSION }}
+          project-dir: native/vrl_nif
+          project-version: ${{ steps.version.outputs.version }}
           target: ${{ matrix.job.target }}
           nif-version: ${{ matrix.nif }}
-          use-cross: ${{ matrix.job.use-cross }}
-          project-dir: native/vrl_nif
-      - uses: actions/upload-artifact@v4
+          # Composite-action inputs are strings and "false" is truthy, which
+          # downloads the Linux-only cross binary on macOS/Windows.
+          use-cross: ${{ matrix.job.use-cross && 'true' || '' }}
+      - uses: softprops/action-gh-release@v2
         with:
-          name: ${{ steps.build-crate.outputs.file-name }}
-          path: ${{ steps.build-crate.outputs.file-path }}
-      - if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: ${{ steps.build-crate.outputs.file-path }}
+
+  checksum:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+      - run: mix deps.get
+      # The first compile needs a checksum file; build locally to get past it.
+      - run: mix rustler_precompiled.download VRL.Native --all --print
+        env:
+          VRL_BUILD: "1"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: checksum-Elixir.VRL.Native.exs
+      - name: Commit checksum file to main
+        run: |
+          git fetch --depth 1 origin main && git checkout main
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add checksum-Elixir.VRL.Native.exs
+          git diff --staged --quiet && exit 0
+          git commit -m "Update NIF checksums for $RELEASE_TAG"
+          git push origin main
+
+  publish:
+    needs: checksum
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Check the tag matches the mix.exs version
+        run: |
+          version=$(grep -oP '@version "\K[^"]+' mix.exs)
+          test "v$version" = "$RELEASE_TAG" || { echo "mix.exs is $version, tag is $RELEASE_TAG"; exit 1; }
+      - run: gh release download "$RELEASE_TAG" --pattern checksum-Elixir.VRL.Native.exs --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+      - run: mix deps.get
+      - run: mix hex.publish --yes
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
