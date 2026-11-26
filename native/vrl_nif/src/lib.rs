@@ -145,7 +145,7 @@ fn run<'a>(
     let mut control = move || {
         checkpoints = checkpoints.wrapping_add(1);
         match deadline {
-            Some(deadline) if checkpoints.is_multiple_of(256) && Instant::now() >= deadline => {
+            Some(deadline) if checkpoints % 256 == 1 && Instant::now() >= deadline => {
                 ControlFlow::Break(())
             }
             _ => ControlFlow::Continue(()),

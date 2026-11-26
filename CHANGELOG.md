@@ -4,6 +4,7 @@
 
 - `VRL.compile/2` `:deny_functions` option, to keep untrusted programs away from host functions
 - `VRL.run/3` `:metadata` option; `VRL.Result` now has a `metadata` field
+- `timeout: 0` now interrupts programs of any length
 
 ## 0.1.0
 

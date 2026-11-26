@@ -123,6 +123,11 @@ defmodule VRLTest do
       assert micros in 5_000_000..6_000_000
     end
 
+    test "timeout: 0 interrupts even short programs" do
+      {:ok, program} = VRL.compile(".a = 1")
+      assert VRL.run(program, %{}, timeout: 0) == {:error, :timeout}
+    end
+
     test "completes programs within the timeout" do
       {:ok, program} = VRL.compile(".a = 1")
       assert {:ok, %VRL.Result{value: 1}} = VRL.run(program, %{}, timeout: 50)
