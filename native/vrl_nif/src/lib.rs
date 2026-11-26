@@ -88,11 +88,21 @@ impl std::panic::RefUnwindSafe for ProgramResource {}
 impl rustler::Resource for ProgramResource {}
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn compile(source: Binary) -> Result<ResourceArc<ProgramResource>, String> {
+fn compile(source: Binary, deny: Vec<String>) -> Result<ResourceArc<ProgramResource>, String> {
     let source = std::str::from_utf8(source.as_slice())
         .map_err(|_| "source must be valid UTF-8".to_owned())?;
+    let fns = vrl::stdlib::all();
+    if let Some(name) = deny
+        .iter()
+        .find(|d| !fns.iter().any(|f| f.identifier() == *d))
+    {
+        return Err(format!("unknown function in :deny_functions: {name:?}"));
+    }
+    let fns: Vec<_> = fns
+        .into_iter()
+        .filter(|f| !deny.iter().any(|d| d == f.identifier()))
+        .collect();
     let program = stacker::grow(STACK_SIZE, || {
-        let fns = vrl::stdlib::all();
         vrl::compiler::compile(source, &fns)
             .map(|result| result.program)
             .map_err(|diagnostics| {
@@ -108,7 +118,7 @@ fn compile(source: Binary) -> Result<ResourceArc<ProgramResource>, String> {
 }
 
 enum Outcome {
-    Ok(Value, Value),
+    Ok(Value, Value, Value),
     Abort(String),
     Error(String),
     Timeout,
@@ -120,9 +130,14 @@ fn run<'a>(
     program: ResourceArc<ProgramResource>,
     event: Term<'a>,
     timeout_ms: Option<u64>,
+    metadata: Term<'a>,
     strip_structs: bool,
 ) -> NifResult<Term<'a>> {
     let value = decode(event, strip_structs)?;
+    let metadata = decode(metadata, strip_structs)?;
+    if !metadata.is_object() {
+        return Err(Error::Term(Box::new("metadata must be a map")));
+    }
     let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
     // Called between expressions; the clock is sampled as reading it every
     // expression slows tight loops by ~70%.
@@ -141,7 +156,7 @@ fn run<'a>(
     let outcome = stacker::grow(STACK_SIZE, move || {
         let mut target = TargetValue {
             value,
-            metadata: Value::Object(ObjectMap::new()),
+            metadata,
             secrets: Secrets::default(),
         };
         let mut runtime = Runtime::new(RuntimeState::default());
@@ -151,10 +166,14 @@ fn run<'a>(
             &TimeZone::default(),
             &mut control,
         ) {
-            Ok(value) if too_deep(&value, 0) || too_deep(&target.value, 0) => {
+            Ok(value)
+                if too_deep(&value, 0)
+                    || too_deep(&target.value, 0)
+                    || too_deep(&target.metadata, 0) =>
+            {
                 Outcome::Error(depth_message())
             }
-            Ok(value) => Outcome::Ok(value, target.value),
+            Ok(value) => Outcome::Ok(value, target.value, target.metadata),
             Err(Terminate::Abort(err)) => Outcome::Abort(err.to_string()),
             Err(Terminate::Interrupted) => Outcome::Timeout,
             Err(err) => Outcome::Error(err.to_string()),
@@ -162,9 +181,13 @@ fn run<'a>(
     });
 
     Ok(match outcome {
-        Outcome::Ok(value, event) => {
-            (atoms::ok(), encode(env, &value), encode(env, &event)).encode(env)
-        }
+        Outcome::Ok(value, event, metadata) => (
+            atoms::ok(),
+            encode(env, &value),
+            encode(env, &event),
+            encode(env, &metadata),
+        )
+            .encode(env),
         Outcome::Abort(message) => (atoms::error(), (atoms::abort(), message)).encode(env),
         Outcome::Error(message) => (atoms::error(), message).encode(env),
         Outcome::Timeout => (atoms::error(), atoms::timeout()).encode(env),

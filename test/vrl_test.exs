@@ -2,7 +2,7 @@ defmodule VRLTest do
   use ExUnit.Case, async: true
   doctest VRL
 
-  describe "compile/1" do
+  describe "compile/2" do
     test "returns a compiled program" do
       assert {:ok, %VRL.Program{source: ".a = 1"}} = VRL.compile(".a = 1")
     end
@@ -25,6 +25,23 @@ defmodule VRLTest do
       source = String.duplicate("[", 1_000) <> "1" <> String.duplicate("]", 1_000)
       assert {status, _} = VRL.compile(source)
       assert status in [:ok, :error]
+    end
+
+    test "deny_functions rejects calls to denied functions" do
+      assert {:error, message} =
+               VRL.compile(~s[get_env_var!("HOME")], deny_functions: ["get_env_var"])
+
+      assert message =~ "call to undefined function"
+      assert {:ok, _} = VRL.compile(~s[upcase("a")], deny_functions: ["get_env_var"])
+    end
+
+    test "deny_functions rejects unknown function names" do
+      assert {:error, "unknown function in :deny_functions: \"get_env\""} =
+               VRL.compile(".", deny_functions: ["get_env"])
+    end
+
+    test "rejects invalid compile options" do
+      assert_raise ArgumentError, fn -> VRL.compile(".", deny: ["log"]) end
     end
 
     test "requires fallible calls to be handled" do
@@ -62,6 +79,26 @@ defmodule VRLTest do
       {:ok, program} = VRL.compile(~s(abort "dropped"))
       assert {:error, {:abort, message}} = VRL.run(program, %{})
       assert message =~ "dropped"
+    end
+  end
+
+  describe "run/3 :metadata" do
+    test "exposes metadata to the program and returns it" do
+      {:ok, program} = VRL.compile(~S|.sig = %signal; %scope.name = "x"; del(%signal)|)
+
+      assert {:ok,
+              %VRL.Result{event: %{"sig" => "logs"}, metadata: %{"scope" => %{"name" => "x"}}}} =
+               VRL.run(program, %{}, metadata: %{"signal" => "logs", "scope" => %{}})
+    end
+
+    test "defaults to empty metadata" do
+      {:ok, program} = VRL.compile("%")
+      assert {:ok, %VRL.Result{value: %{}, metadata: %{}}} = VRL.run(program)
+    end
+
+    test "rejects non-map metadata" do
+      {:ok, program} = VRL.compile(".")
+      assert_raise ArgumentError, fn -> VRL.run(program, %{}, metadata: [1]) end
     end
   end
 

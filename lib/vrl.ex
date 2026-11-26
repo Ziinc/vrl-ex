@@ -2,13 +2,13 @@ defmodule VRL do
   @moduledoc """
   Elixir bindings for [Vector Remap Language](https://vrl.dev).
 
-  Compile a program once with `compile/1`, then run it against many events
+  Compile a program once with `compile/2`, then run it against many events
   with `run/3`. The full VRL standard library is available, except for
   network functions.
 
       iex> {:ok, program} = VRL.compile(".message = upcase!(.message)")
       iex> VRL.run(program, %{"message" => "hello"})
-      {:ok, %VRL.Result{value: "HELLO", event: %{"message" => "HELLO"}}}
+      {:ok, %VRL.Result{value: "HELLO", event: %{"message" => "HELLO"}, metadata: %{}}}
 
   ## Value conversion
 
@@ -61,10 +61,19 @@ defmodule VRL do
 
   Returns `{:error, diagnostics}` with human-readable diagnostics when the
   program is invalid.
+
+  ## Options
+
+    * `:deny_functions` - names of standard library functions the program may
+      not call. Functions that read the host are `get_env_var`, `get_hostname`,
+      `get_timezone_name`, `encode_proto`, `parse_proto`, `parse_etld` and
+      `validate_json_schema`; deny them for untrusted programs.
   """
-  @spec compile(String.t()) :: {:ok, Program.t()} | {:error, String.t()}
-  def compile(source) when is_binary(source) do
-    with {:ok, ref} <- VRL.Native.compile(source) do
+  @spec compile(String.t(), keyword()) :: {:ok, Program.t()} | {:error, String.t()}
+  def compile(source, opts \\ []) when is_binary(source) do
+    opts = Keyword.validate!(opts, deny_functions: [])
+
+    with {:ok, ref} <- VRL.Native.compile(source, Enum.map(opts[:deny_functions], &to_string/1)) do
       {:ok, %Program{source: source, ref: ref}}
     end
   end
@@ -81,17 +90,29 @@ defmodule VRL do
     * `:timeout` - maximum run time in milliseconds, or `:infinity`.
       Defaults to `5000`. Checked between VRL expressions, so a single
       long-running function call can overrun it.
+    * `:metadata` - map exposed to the program as `%`. Defaults to `%{}`.
     * `:strip_structs` - when `true`, structs other than `DateTime` are
       passed as plain maps without the `"__struct__"` key. Defaults to `false`.
   """
   @spec run(Program.t(), event(), keyword()) ::
           {:ok, Result.t()} | {:error, run_error() | :timeout}
   def run(%Program{ref: ref}, event \\ %{}, opts \\ []) do
-    opts = Keyword.validate!(opts, timeout: @default_timeout, strip_structs: false)
+    opts = Keyword.validate!(opts, timeout: @default_timeout, metadata: %{}, strip_structs: false)
+    metadata = opts[:metadata]
 
-    with {:ok, value, event} <-
-           VRL.Native.run(ref, event, timeout_ms(opts[:timeout]), opts[:strip_structs] == true) do
-      {:ok, %Result{value: value, event: event}}
+    unless is_map(metadata) and not is_struct(metadata) do
+      raise ArgumentError, "expected :metadata to be a map, got: #{inspect(metadata)}"
+    end
+
+    with {:ok, value, event, metadata} <-
+           VRL.Native.run(
+             ref,
+             event,
+             timeout_ms(opts[:timeout]),
+             metadata,
+             opts[:strip_structs] == true
+           ) do
+      {:ok, %Result{value: value, event: event, metadata: metadata}}
     end
   end
 
