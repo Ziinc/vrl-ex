@@ -116,6 +116,42 @@ defmodule VRL do
     end
   end
 
+  @doc """
+  Runs `program` over a batch of JSON `documents` in one native call, parsing
+  and writing JSON in Rust. Prefer it over `run/3` for throughput.
+
+  Returns, per document, `{:ok, json, event_bytes}` with the new document and
+  the byte length of its event JSON, `:abort`, `{:error, :timeout}` or
+  `{:error, message}`.
+
+  ## Options
+
+    * `:event` - top-level key holding the event. Other keys are copied
+      verbatim, in order. Defaults to `nil`: the whole document is the event.
+    * `:metadata` - top-level keys exposed as `%key` (requires `:event`) and
+      written back if present in the document; `{key, :read_only}` is not
+      written back. Defaults to `[]`.
+    * `:timeout` - as in `run/3`, per document.
+  """
+  @spec run_json(Program.t(), [binary()], keyword()) ::
+          [{:ok, binary(), non_neg_integer()} | :abort | {:error, :timeout | String.t()}]
+  def run_json(%Program{ref: ref}, documents, opts \\ []) when is_list(documents) do
+    opts = Keyword.validate!(opts, timeout: @default_timeout, event: nil, metadata: [])
+
+    if opts[:metadata] != [] and is_nil(opts[:event]) do
+      raise ArgumentError, ":metadata requires :event"
+    end
+
+    metadata =
+      Enum.map(opts[:metadata], fn
+        {key, :read_only} -> {to_string(key), false}
+        key -> {to_string(key), true}
+      end)
+
+    event = if opts[:event], do: to_string(opts[:event])
+    VRL.Native.run_json(ref, documents, event, metadata, timeout_ms(opts[:timeout]))
+  end
+
   defp timeout_ms(:infinity), do: nil
   defp timeout_ms(ms) when is_integer(ms) and ms >= 0, do: ms
 

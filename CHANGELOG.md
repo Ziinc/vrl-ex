@@ -4,6 +4,7 @@
 
 - `VRL.compile/2` `:deny_functions` option, to keep untrusted programs away from host functions
 - `VRL.run/3` `:metadata` option; `VRL.Result` now has a `metadata` field
+- `VRL.run_json/3`: runs a batch of JSON documents in one native call, with serde in Rust
 - `timeout: 0` now interrupts programs of any length
 
 ## 0.1.0

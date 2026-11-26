@@ -22,6 +22,9 @@ defmodule VRL.Native do
 
   def compile(_source, _deny_functions), do: :erlang.nif_error(:nif_not_loaded)
 
+  def run_json(_program, _docs, _event_key, _metadata, _timeout_ms),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   def run(_program, _event, _timeout_ms, _metadata, _strip_structs),
     do: :erlang.nif_error(:nif_not_loaded)
 end

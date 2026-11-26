@@ -10,7 +10,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false }
+indexmap = { version = "2", features = ["serde"] }
 rustler = "0.38"
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 stacker = "0.1"
 vrl = { version = "0.39", default-features = false, features = [
   "compiler",

@@ -2,6 +2,9 @@ use std::mem::ManuallyDrop;
 use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
+use indexmap::IndexMap;
+use serde_json::value::RawValue;
+
 use chrono::{DateTime, Datelike, NaiveDate, TimeDelta, Timelike, Utc};
 use rustler::types::map::MapIterator;
 use rustler::{
@@ -138,19 +141,7 @@ fn run<'a>(
     if !metadata.is_object() {
         return Err(Error::Term(Box::new("metadata must be a map")));
     }
-    let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
-    // Called between expressions; the clock is sampled as reading it every
-    // expression slows tight loops by ~70%.
-    let mut checkpoints: u32 = 0;
-    let mut control = move || {
-        checkpoints = checkpoints.wrapping_add(1);
-        match deadline {
-            Some(deadline) if checkpoints % 256 == 1 && Instant::now() >= deadline => {
-                ControlFlow::Break(())
-            }
-            _ => ControlFlow::Continue(()),
-        }
-    };
+    let mut control = deadline_control(timeout_ms);
 
     // Only pure Rust runs on the grown stack; ERTS calls stay on the scheduler stack.
     let outcome = stacker::grow(STACK_SIZE, move || {
@@ -192,6 +183,171 @@ fn run<'a>(
         Outcome::Error(message) => (atoms::error(), message).encode(env),
         Outcome::Timeout => (atoms::error(), atoms::timeout()).encode(env),
     })
+}
+
+// Called between expressions; the clock is sampled as reading it every
+// expression slows tight loops by ~70%.
+fn deadline_control(timeout_ms: Option<u64>) -> impl FnMut() -> ControlFlow<()> {
+    let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
+    let mut checkpoints: u32 = 0;
+    move || {
+        checkpoints = checkpoints.wrapping_add(1);
+        match deadline {
+            Some(deadline) if checkpoints % 256 == 1 && Instant::now() >= deadline => {
+                ControlFlow::Break(())
+            }
+            _ => ControlFlow::Continue(()),
+        }
+    }
+}
+
+enum JsonOutcome {
+    /// The new document and the length of its event JSON.
+    Ok(Vec<u8>, usize),
+    Abort,
+    Timeout,
+    Error(String),
+}
+
+/// Runs the program over a batch of JSON documents in one call, parsing and
+/// writing JSON in Rust. With `event_key`, the event is that top-level key,
+/// `metadata` keys (name, writable) are exposed as `%`, and every other key is
+/// copied verbatim.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn run_json<'a>(
+    env: Env<'a>,
+    program: ResourceArc<ProgramResource>,
+    docs: Vec<Binary<'a>>,
+    event_key: Option<String>,
+    metadata: Vec<(String, bool)>,
+    timeout_ms: Option<u64>,
+) -> Vec<Term<'a>> {
+    let docs: Vec<&[u8]> = docs.iter().map(|doc| doc.as_slice()).collect();
+    let outcomes = stacker::grow(STACK_SIZE, || {
+        let mut runtime = Runtime::new(RuntimeState::default());
+        docs.iter()
+            .map(|doc| {
+                let outcome = run_doc(
+                    &program.0,
+                    &mut runtime,
+                    doc,
+                    event_key.as_deref(),
+                    &metadata,
+                    timeout_ms,
+                );
+                runtime.clear();
+                outcome
+            })
+            .collect::<Vec<_>>()
+    });
+
+    outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            JsonOutcome::Ok(json, size) => {
+                (atoms::ok(), encode_binary(env, &json), size).encode(env)
+            }
+            JsonOutcome::Abort => atoms::abort().encode(env),
+            JsonOutcome::Timeout => (atoms::error(), atoms::timeout()).encode(env),
+            JsonOutcome::Error(message) => (atoms::error(), message).encode(env),
+        })
+        .collect()
+}
+
+fn run_doc(
+    program: &Program,
+    runtime: &mut Runtime,
+    doc: &[u8],
+    event_key: Option<&str>,
+    metadata: &[(String, bool)],
+    timeout_ms: Option<u64>,
+) -> JsonOutcome {
+    let invalid = |e: serde_json::Error| JsonOutcome::Error(format!("invalid JSON: {e}"));
+    let (value, fields) = match event_key {
+        None => match serde_json::from_slice::<Value>(doc) {
+            Ok(value) => (value, None),
+            Err(e) => return invalid(e),
+        },
+        Some(key) => {
+            let fields: IndexMap<String, &RawValue> = match serde_json::from_slice(doc) {
+                Ok(fields) => fields,
+                Err(e) => return invalid(e),
+            };
+            let Some(raw) = fields.get(key) else {
+                return JsonOutcome::Error(format!("missing key {key:?}"));
+            };
+            match serde_json::from_str::<Value>(raw.get()) {
+                Ok(value) => (value, Some(fields)),
+                Err(e) => return invalid(e),
+            }
+        }
+    };
+
+    let mut meta = ObjectMap::new();
+    for (key, _) in metadata {
+        if let Some(raw) = fields.as_ref().and_then(|f| f.get(key)) {
+            match serde_json::from_str::<Value>(raw.get()) {
+                Ok(value) => meta.insert(key.as_str().into(), value),
+                Err(e) => return invalid(e),
+            };
+        }
+    }
+
+    let mut target = TargetValue {
+        value,
+        metadata: Value::Object(meta),
+        secrets: Secrets::default(),
+    };
+    let mut control = deadline_control(timeout_ms);
+    match runtime.resolve_with_control(&mut target, program, &TimeZone::default(), &mut control) {
+        Ok(_) => {}
+        Err(Terminate::Abort(_)) => return JsonOutcome::Abort,
+        Err(Terminate::Interrupted) => return JsonOutcome::Timeout,
+        Err(err) => return JsonOutcome::Error(err.to_string()),
+    }
+
+    match write_doc(&target, fields.as_ref(), event_key, metadata) {
+        Ok((json, size)) => JsonOutcome::Ok(json, size),
+        Err(e) => JsonOutcome::Error(e.to_string()),
+    }
+}
+
+fn write_doc(
+    target: &TargetValue,
+    fields: Option<&IndexMap<String, &RawValue>>,
+    event_key: Option<&str>,
+    metadata: &[(String, bool)],
+) -> serde_json::Result<(Vec<u8>, usize)> {
+    let Some(fields) = fields else {
+        let json = serde_json::to_vec(&target.value)?;
+        let size = json.len();
+        return Ok((json, size));
+    };
+
+    let mut out = vec![b'{'];
+    let mut size = 0;
+    for (i, (key, raw)) in fields.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        serde_json::to_writer(&mut out, key)?;
+        out.push(b':');
+        if Some(key.as_str()) == event_key {
+            let start = out.len();
+            serde_json::to_writer(&mut out, &target.value)?;
+            size = out.len() - start;
+        } else if metadata.iter().any(|(k, writable)| k == key && *writable) {
+            let value = match &target.metadata {
+                Value::Object(map) => map.get(key.as_str()),
+                _ => None,
+            };
+            serde_json::to_writer(&mut out, &value.unwrap_or(&Value::Null))?;
+        } else {
+            out.extend_from_slice(raw.get().as_bytes());
+        }
+    }
+    out.push(b'}');
+    Ok((out, size))
 }
 
 fn depth_message() -> String {

@@ -102,6 +102,63 @@ defmodule VRLTest do
     end
   end
 
+  describe "run_json/3" do
+    test "runs the program over each whole document by default" do
+      {:ok, program} = VRL.compile(~S|.n = int!(.n) + 1|)
+
+      assert [{:ok, ~s({"n":2}), 7}, {:ok, ~s({"n":3}), 7}] =
+               VRL.run_json(program, [~s({"n":1}), ~s({"n":2}\n)])
+    end
+
+    test "event: runs over one key and copies the others verbatim, in order" do
+      {:ok, program} = VRL.compile(~S|.b = 2|)
+      doc = ~s({"z": 1.50, "data": {"a":1}, "id":"x"})
+
+      assert [{:ok, ~s({"z":1.50,"data":{"a":1,"b":2},"id":"x"}), 13}] =
+               VRL.run_json(program, [doc], event: "data")
+    end
+
+    test "metadata: exposes keys as % and writes back only present, writable ones" do
+      {:ok, program} = VRL.compile(~S|.s = %signal; %signal = "x"; %scope.v = 1; %resource = 1|)
+      doc = ~s({"signal":"log","scope":{},"data":{}})
+
+      assert [{:ok, ~s({"signal":"log","scope":{"v":1},"data":{"s":"log"}}), 11}] =
+               VRL.run_json(program, [doc],
+                 event: "data",
+                 metadata: [{"signal", :read_only}, "scope", "resource"]
+               )
+    end
+
+    test "returns :abort, timeouts and errors per document" do
+      {:ok, program} = VRL.compile(~S|if .drop == true { abort }; .n = to_int!(.n)|)
+      docs = [~s({"drop":true}), ~s({"n":"x"}), "not json", ~s({"n":"1"})]
+
+      assert [:abort, {:error, error}, {:error, "invalid JSON: " <> _}, {:ok, ~s({"n":1}), 7}] =
+               VRL.run_json(program, docs)
+
+      assert error =~ "to_int"
+      assert [{:error, :timeout}] = VRL.run_json(program, [~s({"n":"1"})], timeout: 0)
+    end
+
+    test "errors when the event key is missing" do
+      {:ok, program} = VRL.compile(".")
+      assert [{:error, ~s(missing key "data")}] = VRL.run_json(program, ["{}"], event: "data")
+    end
+
+    test "writes VRL values as VRL's JSON does" do
+      {:ok, program} =
+        VRL.compile(~S|.t = t'2024-01-02T03:04:05.120Z'; .b = decode_base64!("/w==")|)
+
+      assert [{:ok, json, _}] = VRL.run_json(program, [~s({"big":18446744073709551616})])
+
+      assert JSON.decode!(json) == %{
+               "big" => 1.8446744073709552e19,
+               "t" => "2024-01-02T03:04:05.120Z",
+               "b" => "\uFFFD"
+             }
+    end
+  end
+
   describe "run/3 :timeout" do
     # ~100M loop iterations: runs far longer than any timeout below.
     @slow ~S"""

@@ -23,6 +23,13 @@ defmodule VRLPropertyTest do
     end
   end
 
+  property "run_json round-trips JSON documents", %{identity: p} do
+    check all(docs <- list_of(json_term(), max_length: 5)) do
+      results = VRL.run_json(p, Enum.map(docs, &JSON.encode!/1))
+      assert Enum.map(results, fn {:ok, json, _} -> JSON.decode!(json) end) == docs
+    end
+  end
+
   property "run never raises on arbitrary terms", %{identity: p} do
     check all(event <- term()) do
       assert {status, _} = VRL.run(p, event)
